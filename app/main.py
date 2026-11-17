@@ -93,3 +93,52 @@ def generate_digit():
     buffer.seek(0)
 
     return StreamingResponse(buffer, media_type="image/png")
+from app.energy_model import EnergyModel, generate_samples
+from app.diffusion_model import DiffusionModel
+
+EBM_IMAGE_SIZE = 32
+DIFFUSION_IMAGE_SIZE = 32
+
+energy_model = EnergyModel()
+energy_model.load_state_dict(torch.load("app/energy_model_weights.pth", map_location="cpu"))
+energy_model.eval()
+
+diffusion_model = DiffusionModel(num_channels=3)
+diffusion_model.load_state_dict(torch.load("app/diffusion_model_weights.pth", map_location="cpu"))
+diffusion_model.eval()
+# The EMA network's BatchNorm running statistics are not part of its "parameters",
+# so update_ema() never kept them in sync during training. Copy them over now
+# from the regular network, which was updated correctly during training.
+for ema_buf, buf in zip(diffusion_model.ema_network.buffers(), diffusion_model.network.buffers()):
+    ema_buf.copy_(buf)
+
+@app.get("/generate-ebm-image")
+def generate_ebm_image():
+    initial_noise = torch.rand((1, 3, EBM_IMAGE_SIZE, EBM_IMAGE_SIZE)) * 2 - 1
+    generated = generate_samples(energy_model, initial_noise, steps=60, step_size=10, noise=0.005)
+
+    image_tensor = (generated.squeeze(0) * 0.5 + 0.5).clamp(0, 1)
+    image_array = (image_tensor.permute(1, 2, 0).numpy() * 255).astype("uint8")
+    image = Image.fromarray(image_array, mode="RGB")
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return StreamingResponse(buffer, media_type="image/png")
+
+
+@app.get("/generate-diffusion-image")
+def generate_diffusion_image():
+    with torch.no_grad():
+        generated = diffusion_model.generate(
+            num_images=1, diffusion_steps=20, image_size=DIFFUSION_IMAGE_SIZE, device="cpu"
+        )
+
+    image_tensor = (generated.squeeze(0) * 0.5 + 0.5).clamp(0, 1)
+    image_array = (image_tensor.permute(1, 2, 0).numpy() * 255).astype("uint8")
+    image = Image.fromarray(image_array, mode="RGB")
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return StreamingResponse(buffer, media_type="image/png")
